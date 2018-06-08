@@ -1,5 +1,5 @@
 /******************************************************************************
-  Filename:        cc110L_easy_link_tx.c
+  Filename:        cc110L_easy_link.c
   
   Description: 
   
@@ -38,8 +38,7 @@ static uint32 packetCounter;
 * STATIC FUNCTIONS
 */
 static void registerConfig(void);
-static void runTX(void);
-static void createPacket(uint8 txBuffer[]);
+static void runRX(void);
 static void radioRxTxISR(void);
 /******************************************************************************
  * @fn          main
@@ -50,82 +49,92 @@ static void radioRxTxISR(void);
  *
  * @return      none
  */
+
 void main(void)
 {
   //init MCU
   halInitMCU();
   //init LEDs
-  //init button
-  halButtonInit();
-
   P1DIR |= 0x01;
-
+  //init button
+  //halButtonInit();
   halButtonInterruptEnable();
   // init spi
   exp430RfSpiInit();
   // write radio registers
   registerConfig();
 
-  uint8 version;
-  cc11xLSpiReadReg(CC110L_VERSION ,&version , 1);
-
-
   // run either TX or RX dependent of build define  
-  runTX();
+  runRX();
  
 }
 /******************************************************************************
- * @fn          runTX
+ * @fn          runRX
  *
- * @brief       sends one packet on button push. Updates packet counter and
- *              display for each packet sent.
+ * @brief       puts radio in RX and waits for packets. Update packet counter
+ *              and display for each packet received.
  *                
  * @param       none
  *
  * @return      none
  */
-static void runTX(void)
+static void runRX(void)
 {
-  // Initialize packet buffer of size PKTLEN + 1
-  uint8 txBuffer[PKTLEN+1] = {0};
-
+  uint8 rxBuffer[64] = {0};
+  uint8 rxBytes;
+  uint8 rxBytesVerify;
+  
    P2SEL &= ~0x40; // P2SEL bit 6 (GDO0) set to one as default. Set to zero (I/O)
   // connect ISR function to GPIO0, interrupt on falling edge
   trxIsrConnect(GPIO_0, FALLING_EDGE, &radioRxTxISR);
   
   // enable interrupt from GPIO_0
   trxEnableInt(GPIO_0);
+     
+    
+  // set radio in RX
+  trxSpiCmdStrobe(CC110L_SRX);
+
+  // reset packet counter
+  packetCounter = 0;
   
+
   // infinite loop
   while(1)
   {
-    // wait for button push
-    //if(halButtonPushed())
-
-        // update packet counter
-        packetCounter++;
-        
-        // create a random packet with PKTLEN + 2 byte packet counter + n x random bytes
-        createPacket(txBuffer);
-      
-      // write packet to tx fifo
-      cc11xLSpiWriteTxFifo(txBuffer,sizeof(txBuffer));
-      
-      // strobe TX to send packet
-      trxSpiCmdStrobe(CC110L_STX);
-      
-        // wait for interrupt that packet has been sent. 
-        // (Assumes the GPIO connected to the radioRxTxISR function is set 
-        // to GPIOx_CFG = 0x06)
-        while(!packetSemaphore);
-        
-        // clear semaphore flag
-        packetSemaphore = ISR_IDLE;
-        
-        P1OUT ^= 0x01;
 
 
-  }
+    // wait for packet received interrupt 
+    if(packetSemaphore == ISR_ACTION_REQUIRED)
+    {
+        cc11xLSpiReadReg(CC110L_RXBYTES,&rxBytesVerify,1);
+        
+        do
+        {
+          rxBytes = rxBytesVerify;
+          cc11xLSpiReadReg(CC110L_RXBYTES,&rxBytesVerify,1);
+        }
+        while(rxBytes != rxBytesVerify);
+        
+        cc11xLSpiReadRxFifo(rxBuffer,(rxBytes));
+        
+        // check CRC ok (CRC_OK: bit7 in second status byte)
+        if(rxBuffer[rxBytes-1] & 0x80)
+        {
+          // toggle led
+          P1OUT ^= 0x01;
+          // update packet counter
+          packetCounter++;
+        }
+      
+      // reset packet semaphore
+      packetSemaphore = ISR_IDLE;
+      
+      // set radio back in RX
+      trxSpiCmdStrobe(CC110L_SRX);
+      
+    }
+  } 
 }
 /*******************************************************************************
 * @fn          radioRxTxISR
@@ -140,10 +149,12 @@ static void runTX(void)
 static void radioRxTxISR(void) {
 
   // set packet semaphore
-  packetSemaphore = ISR_ACTION_REQUIRED;
+
+    packetSemaphore = ISR_ACTION_REQUIRED;
   // clear isr flag
   trxClearIntFlag(GPIO_0);
 }
+
 /*******************************************************************************
 * @fn          registerConfig
 *
@@ -155,11 +166,6 @@ static void radioRxTxISR(void) {
 */
 static void registerConfig(void) {
   uint8 writeByte;
-  uint8 readByte;
-#ifdef PA_TABLE
-  uint8 paTable[] = PA_TABLE;
-#endif
-  
   uint16 i;
   // reset radio
   trxSpiCmdStrobe(CC110L_SRES);
@@ -167,48 +173,6 @@ static void registerConfig(void) {
   for(i = 0; i < (sizeof  preferredSettings/sizeof(registerSetting_t)); i++) {
     writeByte =  preferredSettings[i].data;
     cc11xLSpiWriteReg( preferredSettings[i].addr, &writeByte, 1);
-  }
-
-
-  for(i = 0; i < (sizeof  preferredSettings/sizeof(registerSetting_t)); i++) {
-     cc11xLSpiReadReg( preferredSettings[i].addr, &readByte, 1);
-   }
-
-#ifdef PA_TABLE
-  // write PA_TABLE
-  cc11xLSpiWriteReg(CC11xL_PA_TABLE0,paTable, sizeof(paTable));
-#endif
-}
-/******************************************************************************
- * @fn          createPacket
- *
- * @brief       This function is called before a packet is transmitted. It fills
- *              the txBuffer with a packet consisting of a length byte, two
- *              bytes packet counter and n random bytes.
- *
- *              The packet format is as follows:
- *              |--------------------------------------------------------------|
- *              |           |           |           |         |       |        |
- *              | pktLength | pktCount1 | pktCount0 | rndData |.......| rndData|
- *              |           |           |           |         |       |        |
- *              |--------------------------------------------------------------|
- *               txBuffer[0] txBuffer[1] txBuffer[2]  ......... txBuffer[PKTLEN]
- *                
- * @param       pointer to start of txBuffer
- *
- * @return      none
- */
-static void createPacket(uint8 txBuffer[])
-{
-    uint8 i;
-  txBuffer[0] = PKTLEN;                     // Length byte
-  txBuffer[1] = (uint8) packetCounter >> 8; // MSB of packetCounter
-  txBuffer[2] = (uint8) packetCounter;      // LSB of packetCounter
-  
-  // fill rest of buffer with random bytes
-  for(i =3; i< (PKTLEN+1); i++)
-  {
-    txBuffer[i] = (uint8)rand();
   }
 }
 /***********************************************************************************

@@ -66,10 +66,6 @@ void main(void)
   // write radio registers
   registerConfig();
 
-  uint8 version;
-  cc11xLSpiReadReg(CC110L_VERSION ,&version , 1);
-
-
   // run either TX or RX dependent of build define  
   runTX();
  
@@ -155,7 +151,6 @@ static void radioRxTxISR(void) {
 */
 static void registerConfig(void) {
   uint8 writeByte;
-  uint8 readByte;
 #ifdef PA_TABLE
   uint8 paTable[] = PA_TABLE;
 #endif
@@ -168,12 +163,6 @@ static void registerConfig(void) {
     writeByte =  preferredSettings[i].data;
     cc11xLSpiWriteReg( preferredSettings[i].addr, &writeByte, 1);
   }
-
-
-  for(i = 0; i < (sizeof  preferredSettings/sizeof(registerSetting_t)); i++) {
-     cc11xLSpiReadReg( preferredSettings[i].addr, &readByte, 1);
-   }
-
 #ifdef PA_TABLE
   // write PA_TABLE
   cc11xLSpiWriteReg(CC11xL_PA_TABLE0,paTable, sizeof(paTable));
